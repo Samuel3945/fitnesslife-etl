@@ -1,0 +1,47 @@
+name: ETL MongoDB to Azure SQL
+
+on:
+  schedule:
+    # 06:00, 12:00, 18:00 and 22:00 Colombia time (UTC-5). Cron runs in UTC.
+    - cron: "0 11,17,23,3 * * *"
+  workflow_dispatch:
+
+# A manual run and a scheduled run never overlap; the second one waits.
+concurrency:
+  group: etl
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  etl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: etl
+    env:
+      MONGODB_URI: ${{ secrets.MONGODB_URI }}
+      MONGODB_DB: ${{ secrets.MONGODB_DB }}
+      AZURE_SQL_SERVER: ${{ secrets.AZURE_SQL_SERVER }}
+      AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+      AZURE_SQL_USER: ${{ secrets.AZURE_SQL_USER }}
+      AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: etl/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run ETL
+        run: python src/run_etl.py
+
+      - name: Validate warehouse against MongoDB
+        run: python src/validate_load.py

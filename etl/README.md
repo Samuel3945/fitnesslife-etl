@@ -101,14 +101,31 @@ La conexión a Azure SQL usa `pymssql`, que no requiere instalar el driver ODBC 
 
 ## Programación
 
-Está previsto ejecutar el ETL 4 veces al día (6:00, 12:00, 18:00 y 22:00, hora Colombia) mediante GitHub Actions, con ejecución manual para demostraciones. La frecuencia se cambia editando únicamente la expresión `cron` del workflow.
+El workflow [`.github/workflows/etl.yml`](../.github/workflows/etl.yml) ejecuta el ETL y luego `validate_load.py`:
+
+- **Automático:** 6:00, 12:00, 18:00 y 22:00 hora Colombia (`cron: "0 11,17,23,3 * * *"`, en UTC). GitHub puede demorar algunos minutos las ejecuciones programadas.
+- **Manual:** pestaña *Actions* → *ETL MongoDB to Azure SQL* → *Run workflow*.
+- **Sin solapamiento:** un grupo `concurrency` hace que una corrida manual y una programada nunca se ejecuten a la vez.
+- Si la carga o la validación fallan, la corrida queda en rojo y GitHub notifica por correo; los datos publicados anteriormente se conservan.
+
+La frecuencia se cambia editando únicamente la expresión `cron`.
+
+### Secrets requeridos
+
+En *Settings* → *Secrets and variables* → *Actions*: `MONGODB_URI`, `MONGODB_DB`, `AZURE_SQL_SERVER`, `AZURE_SQL_DATABASE`, `AZURE_SQL_USER`, `AZURE_SQL_PASSWORD`. Desde la raíz del repositorio pueden cargarse todos a partir del `.env` local:
+
+```bash
+gh secret set -f etl/.env
+```
+
+Requisitos de red: el firewall de Azure SQL debe permitir servicios de Azure, y MongoDB Atlas debe aceptar conexiones desde las IP de GitHub Actions (por ejemplo `0.0.0.0/0` en *Network Access*).
 
 ## Migración al repositorio principal
 
 Esta carpeta es autocontenida y no depende de ningún otro código del proyecto. Para integrarla al repositorio principal:
 
 1. Copiar la carpeta `etl/` a la raíz del repositorio principal.
-2. Copiar `.github/workflows/etl.yml` a `.github/workflows/` del repositorio principal (cuando exista).
+2. Copiar `.github/workflows/etl.yml` a `.github/workflows/` del repositorio principal.
 3. Registrar los mismos *secrets* del workflow en el repositorio principal.
 
 Para conservar el historial de commits, en lugar de copiar se puede usar `git subtree`:

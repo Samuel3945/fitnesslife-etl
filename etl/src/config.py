@@ -15,9 +15,9 @@ class Settings:
     azure_database: str
     azure_user: str
     azure_password: str
-    # The application stores LocalDateTime values as-is (gym wall-clock time) and
-    # reads them back with getHour(); the ETL keeps that interpretation by default.
-    # Set ETL_SOURCE_TIMEZONE to an IANA zone only if source timestamps become true UTC.
+    # MongoDB stores UTC instants; the application (JVM in Colombia time) converts them
+    # to local time before displaying them. The ETL does the same so the warehouse
+    # matches the application. Set ETL_SOURCE_TIMEZONE=UTC to keep raw UTC values.
     source_timezone: ZoneInfo | None
     local_timezone: ZoneInfo
     min_publish_ratio: float
@@ -33,7 +33,7 @@ def load_settings() -> Settings:
     if missing:
         raise RuntimeError(f"Missing environment variables: {', '.join(missing)}")
 
-    source_tz = os.environ.get("ETL_SOURCE_TIMEZONE", "").strip()
+    source_tz = os.environ.get("ETL_SOURCE_TIMEZONE", "").strip() or "America/Bogota"
     return Settings(
         mongodb_uri=os.environ["MONGODB_URI"],
         mongodb_db=os.environ.get("MONGODB_DB", "fitnesslife"),
@@ -41,7 +41,7 @@ def load_settings() -> Settings:
         azure_database=os.environ["AZURE_SQL_DATABASE"],
         azure_user=os.environ["AZURE_SQL_USER"],
         azure_password=os.environ["AZURE_SQL_PASSWORD"],
-        source_timezone=ZoneInfo(source_tz) if source_tz else None,
+        source_timezone=None if source_tz.upper() == "UTC" else ZoneInfo(source_tz),
         local_timezone=ZoneInfo("America/Bogota"),
         min_publish_ratio=float(os.environ.get("ETL_MIN_PUBLISH_RATIO", "0.5")),
     )

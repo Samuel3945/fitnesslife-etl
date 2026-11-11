@@ -48,7 +48,7 @@ Re-ejecutar el proceso no duplica datos. Valores numéricos inválidos (NaN) se 
 
 | Regla | Detalle |
 |---|---|
-| Zona horaria | La aplicación guarda `LocalDateTime` con la hora local del gimnasio y la lee tal cual (`getHour()`). El ETL conserva esa interpretación. `ETL_SOURCE_TIMEZONE` permite convertir si el origen pasara a guardar UTC real. |
+| Zona horaria | MongoDB guarda instantes en UTC y la aplicación (JVM en hora Colombia) los convierte a hora local al mostrarlos. El ETL hace la misma conversión (`ETL_SOURCE_TIMEZONE`, por defecto `America/Bogota`), verificada contra el dashboard original: ingresos de noviembre $13.790.000 y mapa de calor de accesos idénticos. Los datos de prueba sembrados quedan con ingresos entre la 1:00 y las 15:59. |
 | Claves sustitutas | Asignadas por el ETL (1..n). La clave `0` es el miembro "No aplica / Desconocido". |
 | `PredictionConfidence` | El origen guarda un porcentaje (0–100); el DW guarda una proporción (0–1). |
 | `DimPlan.WeeklyGroupClasses` | Se deriva de los beneficios. `NULL` = clases grupales ilimitadas. "Todo de &lt;Plan&gt;" hereda los beneficios de ese plan. |

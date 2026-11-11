@@ -4,51 +4,111 @@ Extrae los datos de MongoDB Atlas, los transforma al modelo estrella y los carga
 
 ```
 MongoDB Atlas  ──►  ETL (Python)  ──►  Azure SQL (Data Warehouse)  ──►  Power BI
-                    PyMongo · Pandas · SQLAlchemy
+                    PyMongo · SQLAlchemy · pymssql
 ```
 
 ## Modelo estrella
 
-- **Hechos:** `FactMemberActivity` (asistencias, pagos, clases y predicciones de abandono, diferenciados por `DimEventType`).
+- **Hechos:** `dw.FactMemberActivity`, con cuatro tipos de evento diferenciados por `DimEventType`:
+  - `ATTENDANCE` — una fila por ingreso al gimnasio (`AttendanceMinutes`).
+  - `PAYMENT` — una fila por pago (`PaymentAmount`, fechas de vigencia).
+  - `CLASS_ENROLLMENT` — una fila por usuario inscrito en una clase funcional.
+  - `CHURN_PREDICTION` — una fila por usuario y día con la predicción de abandono.
 - **Dimensiones:** `DimDate`, `DimTime`, `DimUser`, `DimPlan`, `DimTraining`, `DimPaymentStatus`, `DimChurnRisk`, `DimEventType`.
 
 Colecciones de origen: `users`, `plans`, `payments`, `attendances`, `functionalTrainings`, `churnPredictions`.
+
+> **Medidas en Power BI:** como hay una sola tabla de hechos, toda medida debe filtrar por `DimEventType[EventType]`.
+
+### Esquemas en Azure SQL
+
+| Esquema | Uso |
+|---|---|
+| `dw` | Modelo estrella publicado (lo lee Power BI). |
+| `stg` | Copia de trabajo que se recarga en cada corrida antes de publicar. |
+| `hist` | `ChurnPredictionSnapshot`: una foto por usuario y **fecha de cálculo** de la predicción (`calculatedAt`, no la fecha de corrida del ETL). **Nunca se borra**; si el mismo día hay varios cálculos, gana el último. Si el modelo predictivo no recalcula un día, ese día no tiene foto. |
+| `etl` | `LoadLog`: una fila por corrida (éxito o fallo), útil para mostrar la fecha de última actualización. |
+
+## Cómo carga los datos
+
+Cada corrida hace una **recarga completa con publicación atómica**:
+
+1. Extrae las 6 colecciones (solo lectura; nunca trae contraseñas, tokens QR ni firmas de pago).
+2. Construye dimensiones y hechos en memoria.
+3. Dentro de **una sola transacción**: carga `stg`, valida y reemplaza `dw`. La validación bloquea la publicación si:
+   - `users` o `plans` vienen vacías;
+   - más del 1 % de los hechos apunta a usuarios o planes inexistentes;
+   - los conteos por tipo de evento no coinciden con el origen o hay `SourceEventId` duplicados;
+   - la carga nueva tiene menos del 50 % de los hechos ya publicados (`ETL_MIN_PUBLISH_RATIO`).
+4. Si algo falla, la transacción se revierte y Power BI sigue viendo los datos anteriores. Azure SQL usa `READ_COMMITTED_SNAPSHOT`, así que las consultas nunca quedan bloqueadas durante la carga.
+
+Re-ejecutar el proceso no duplica datos. Valores numéricos inválidos (NaN) se cargan como vacíos y los textos que exceden su columna se recortan; ambos casos quedan como advertencia en `etl.LoadLog`. Los mensajes de error nunca incluyen valores de filas (correos, documentos, teléfonos).
+
+## Reglas de transformación
+
+| Regla | Detalle |
+|---|---|
+| Zona horaria | La aplicación guarda `LocalDateTime` con la hora local del gimnasio y la lee tal cual (`getHour()`). El ETL conserva esa interpretación. `ETL_SOURCE_TIMEZONE` permite convertir si el origen pasara a guardar UTC real. |
+| Claves sustitutas | Asignadas por el ETL (1..n). La clave `0` es el miembro "No aplica / Desconocido". |
+| `PredictionConfidence` | El origen guarda un porcentaje (0–100); el DW guarda una proporción (0–1). |
+| `DimPlan.WeeklyGroupClasses` | Se deriva de los beneficios. `NULL` = clases grupales ilimitadas. "Todo de &lt;Plan&gt;" hereda los beneficios de ese plan. |
+| `DimPlan.HasLockers` | Verdadero si algún beneficio (incluidos los heredados) menciona casilleros. |
+| `DimPlan.PlanLevel` | Tomado de `churnPredictions.planLevel`; si falta, el orden por precio. |
+| `DimTime.IsPeakHour` | Una hora es pico si su cantidad de ingresos está en el cuartil superior de las horas con actividad. |
+| `DimDate.IsHoliday` | Festivos de Colombia (librería `holidays`). |
+| `DimUser.AgeGroup` | Edad calculada a la fecha de carga. |
 
 ## Estructura
 
 ```
 etl/
-├── src/              # Código del ETL (extract, transform, load)
-├── sql/              # DDL del Data Warehouse
+├── src/
+│   ├── apply_schema.py     # Crea o verifica las tablas (idempotente)
+│   ├── run_etl.py          # Ejecuta el ETL completo
+│   ├── validate_load.py    # Compara Azure SQL contra MongoDB
+│   ├── profile_source.py   # Perfilado de solo lectura del origen
+│   ├── config.py · db.py · extract.py · transform.py · load.py
+├── sql/
+│   └── 001_create_schema.sql
 ├── requirements.txt
-├── .env.example      # Plantilla de variables de entorno (sin credenciales)
+├── .env.example
 └── README.md
 ```
 
 ## Ejecución local
 
-1. Python 3.12 y el driver ODBC 18 para SQL Server.
+1. Python 3.12.
 2. Crear el entorno virtual e instalar dependencias:
    ```bash
    cd etl
-   python3 -m venv .venv
+   python3.12 -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt
    ```
 3. Copiar `.env.example` a `.env` y completar las credenciales. **`.env` nunca se versiona.**
+4. Crear las tablas (solo la primera vez):
+   ```bash
+   python src/apply_schema.py
+   ```
+   El DDL solo crea tablas que no existen: **no modifica columnas de tablas existentes**. Un cambio de columnas requiere un `ALTER TABLE` manual (o un nuevo script `002_*.sql`), aplicado por igual en `dw` y `stg`, y reflejado en `STRING_LIMITS` de `transform.py`.
+5. Ejecutar y validar:
+   ```bash
+   python src/run_etl.py
+   python src/validate_load.py
+   ```
+
+La conexión a Azure SQL usa `pymssql`, que no requiere instalar el driver ODBC de Microsoft. Si la IP local cambia, debe agregarse en el firewall del servidor de Azure SQL.
 
 ## Programación
 
-El ETL se ejecuta 4 veces al día (6:00, 12:00, 18:00 y 22:00, hora Colombia) mediante GitHub Actions, y también puede lanzarse manualmente. La frecuencia se cambia editando únicamente la expresión `cron` del workflow.
-
-El proceso es incremental e idempotente: re-ejecutarlo no duplica datos.
+Está previsto ejecutar el ETL 4 veces al día (6:00, 12:00, 18:00 y 22:00, hora Colombia) mediante GitHub Actions, con ejecución manual para demostraciones. La frecuencia se cambia editando únicamente la expresión `cron` del workflow.
 
 ## Migración al repositorio principal
 
 Esta carpeta es autocontenida y no depende de ningún otro código del proyecto. Para integrarla al repositorio principal:
 
 1. Copiar la carpeta `etl/` a la raíz del repositorio principal.
-2. Copiar `.github/workflows/etl.yml` a `.github/workflows/` del repositorio principal.
+2. Copiar `.github/workflows/etl.yml` a `.github/workflows/` del repositorio principal (cuando exista).
 3. Registrar los mismos *secrets* del workflow en el repositorio principal.
 
 Para conservar el historial de commits, en lugar de copiar se puede usar `git subtree`:
